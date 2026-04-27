@@ -65,6 +65,8 @@ digraph main_flow {
    - **外部依赖清单**：数据库调用、API调用、文件操作
    - **状态机清单**：所有可能的状态和状态转换
    - **输入入口清单**：所有接收用户输入的地方
+   - **公开入口图**：从根入口（README / index.html / main / cli entry）BFS 出"可触达文件集合"，与 step 1 列出的全集做差，得到 **orphan 候选清单**（供 3.8.1 用）
+   - **跨文件相似度清单**：用 `wc -l` + `diff -q` 或 hash 对所有同语言文件做粗筛，挑出行数差 < 10% 且同前缀的对，作为 **clone-drift 候选**（供 3.8.2 用）
 
 3. 将清单摘要写入 `BUGS.md` 的顶部（作为覆盖率基准）：
    ```markdown
@@ -181,6 +183,34 @@ digraph main_flow {
 - 深层嵌套的 JSON
 - 大量循环调用同一接口
 
+### 3.8 项目级 Hygiene 攻击（白盒可执行，不需要 runtime）
+
+> 来源：与 `gstack/qa-only` 的 A/B benchmark 表明，纯白盒 7 攻击向量会**系统性遗漏**项目级缺陷类。本节补齐这块盲区。
+
+#### 3.8.1 Orphan / 死链
+- 拿 Phase 1 step 2 的 **orphan 候选清单**，逐个判断：
+  - 是有意保留的归档（`archive/`、`.bak`） → 跳过
+  - 否则 → BUG（攻击向量标 `项目hygiene`，severity 至少 Medium，理由：用户/搜索引擎永远找不到 → 死代码 → 漂移源）
+- 同时检查 `<a href>`、`import`、`require` 中指向**不存在文件**的链接 → BUG。
+
+#### 3.8.2 文件克隆漂移检测
+- 对 Phase 1 的 clone-drift 候选对，跑 `diff -u A B`：
+  - **完全相同** → BUG（重复维护源，未来 N 次必漂移）
+  - **几乎相同但有局部差异** → 高危 BUG（已经在漂移）
+- 报告必须列出差异行号，不能只说"看起来很像"。
+
+#### 3.8.3 跨组件 UX / 协议一致性
+- 对每个**键盘快捷键 / UI 符号 / 配置 key / API 字段名**，在所有文件中搜索它的所有 occurrence：
+  - 含义不一致 → BUG（典型例：键 `A` 在 demo₁ 是 "允许"，在 demo₂ 是 "禁止"）
+  - 命名漂移（`user_id` 与 `userId` 混用）→ BUG
+- 实践命令：`grep -nE "你的符号" -r .`，然后按使用位置分类。
+
+#### 3.8.4 a11y / WCAG 快查（仅当目标含 web UI）
+- `viewport` 含 `user-scalable=no` 或 `maximum-scale=1` → BUG（WCAG 1.4.4 violation）
+- 仅鼠标可触发的交互（无 keydown / focus 路径）→ BUG（WCAG 2.1.1）
+- `<img>` 缺 `alt`、`<button>` 仅图标无 `aria-label` → BUG
+- 不需要真浏览器，grep + 静态分析就能拿到大多数。
+
 ---
 
 ## Phase 4: 错误记录规范
@@ -220,7 +250,7 @@ digraph main_flow {
 
 - **触发的代码路径**: {从入口到出错点的函数调用链}
 
-- **攻击向量**: 边界值 / 状态机 / 并发 / 缺失值 / 注入 / 其他
+- **攻击向量**: 边界值 / 状态机 / 并发 / 缺失值 / 注入 / 大数据 / 项目hygiene / 其他
 
 - **发现时间**: {ISO 时间戳}
 ```
@@ -241,7 +271,7 @@ digraph main_flow {
 | 输入入口 | X | Y | Z% |
 | 错误处理路径 | X | Y | Z% |
 | 状态转换 | X | Y | Z% |
-| 攻击向量类型 | X | 7 | Z% |
+| 攻击向量类型 | X | 8 | Z% |
 
 **综合估计覆盖率**: Z%
 **已发现 Bug 数**: N (Critical: X, High: X, Medium: X, Low: X)
@@ -257,6 +287,7 @@ digraph main_flow {
 3. **所有 P0 攻击向量**已应用到所有 P0 入口点
 4. **连续两轮攻击**没有发现新的 High/Critical Bug
 5. **所有错误处理路径**至少触发过一次
+6. **3.8 项目级 hygiene 至少完整跑过一轮**（orphan / clone-drift / 跨组件一致性 / a11y）
 
 **如果达不到以上标准，必须继续 Phase 3。**
 
@@ -281,6 +312,7 @@ digraph loop_control {
 - **第2轮**：状态机攻击 + 缺失值 + 重复提交
 - **第3轮**：并发攻击 + 错误处理路径触发
 - **第4轮**：注入攻击 + 大数据攻击
+- **第5轮**：3.8 项目级 hygiene（orphan / clone-drift / 跨组件一致性 / a11y）
 - **第N轮**：专注还未覆盖的函数/分支
 
 **每轮必须问自己**：上一轮发现了几个 Bug？没发现 Bug ≠ 可以停止，要检查覆盖率是否真的提升了。
@@ -349,3 +381,15 @@ digraph loop_control {
 | "代码看起来写得很好" | 白盒测试不是审美，是找边界。好看的代码也会崩。 |
 | "已经找了很多 Bug 了" | 看覆盖率，不看 Bug 数量。 |
 | "95%太高了" | 这是最低标准。用户会找到你没测过的 5%。 |
+
+---
+
+## 适配场景与互补工具
+
+`chaos-qa-hunter` 的强项是**单文件 / 单功能内部的破坏性深挖**：状态机、并发、注入、边界。
+弱项（即便加了 3.8 也仍然存在）：
+- 真浏览器 visual / responsive / Core Web Vitals
+- 跨设备真触屏并发
+- Console / network 实测
+
+如果目标是 web 前端，建议与一个**真浏览器跑 + 黑盒 UAT** 的 skill（例如 `gstack/qa-only`）配合：chaos 跑深，那一类跑广。详见仓库 `BENCHMARK.md`。
